@@ -1,5 +1,10 @@
 # VPS Deployment Guide with PM2
 
+> **Optional.** The recommended setup is free on GitHub Actions — see [SETUP.md](SETUP.md).
+> Use this guide only if you move the bot to your own VPS. It now uses Telegram:
+> put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` wherever this guide says
+> "Discord webhook URL".
+
 This guide will help you deploy your Plaza Apartment Scraper on a VPS with PM2 for process management and monitoring.
 
 ## 🚀 Quick Setup

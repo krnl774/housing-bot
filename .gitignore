@@ -1,4 +1,4 @@
-# Environment variables
+# Secrets - never commit these
 .env
 
 # Logs
@@ -33,5 +33,5 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Scraper data
-seen_listings.json
+# Old state files from the Discord version (the state/ folder replaces them)
+seen_listings*.json

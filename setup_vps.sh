@@ -37,10 +37,13 @@ pip3 install -r requirements.txt
 if [ ! -f .env ]; then
     echo "📝 Creating .env template..."
     cat > .env << EOL
-# Discord Webhook URL for notifications
-DISCORD_WEBHOOK_URL=your_discord_webhook_url_here
+# Telegram bot settings (see SETUP.md)
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+PLAZA_USERNAME=
+PLAZA_PASSWORD=
 EOL
-    echo "⚠️  Please edit .env file with your actual Discord webhook URL"
+    echo "⚠️  Please edit .env with your Telegram bot token and chat id"
 fi
 
 # Set up PM2 startup script (so it starts on boot)
@@ -56,7 +59,7 @@ sed -i "s|/path/to/your/scraper|$CURRENT_DIR|g" ecosystem.config.js
 echo "✅ Setup complete!"
 echo ""
 echo "📋 Next steps:"
-echo "1. Edit .env file with your Discord webhook URL"
+echo "1. Edit .env with your Telegram bot token and chat id"
 echo "2. Run: pm2 start ecosystem.config.js"
 echo "3. Run: pm2 save (to save current PM2 configuration)"
 echo "4. Set up PM2 Plus monitoring (optional):"

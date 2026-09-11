@@ -1,0 +1,73 @@
+# Runs the housing bot on GitHub's servers, for free.
+# Fast mode: every run keeps checking once a minute for about 9 minutes, and a
+# new run is started every 5 minutes, so there's (almost) always one running.
+# Secrets come from Settings -> Secrets and variables -> Actions, never from this file.
+
+name: Housing watcher
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:           # adds a "Run workflow" button on the Actions tab
+    inputs:
+      mode:
+        description: "What to do"
+        type: choice
+        default: normal
+        options:
+          - normal
+          - test-telegram
+          - check-plaza-login
+
+permissions:
+  contents: write              # lets the job save which listings it has already seen
+
+concurrency:
+  group: housing-watcher       # one run at a time; the next one waits ("Cancelled" runs are normal)
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PLAZA_USERNAME: ${{ secrets.PLAZA_USERNAME }}
+      PLAZA_PASSWORD: ${{ secrets.PLAZA_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send Telegram test message
+        if: ${{ inputs.mode == 'test-telegram' }}
+        run: python scraper.py --test
+
+      - name: Test Plaza login (does not apply)
+        if: ${{ inputs.mode == 'check-plaza-login' }}
+        run: python scraper.py --check-login
+
+      - name: Check listings every minute (and apply)
+        if: ${{ !inputs.mode || inputs.mode == 'normal' }}
+        run: python scraper.py --loop-minutes 9 --interval 60
+
+      - name: Save seen listings
+        if: ${{ always() && (!inputs.mode || inputs.mode == 'normal') }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -d state ] && git add state/
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          git commit -m "Update seen listings"
+          git pull --rebase
+          git push
