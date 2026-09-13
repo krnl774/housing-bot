@@ -23,8 +23,8 @@ permissions:
   contents: write              # lets the job save which listings it has already seen
 
 concurrency:
-  group: housing-watcher       # one run at a time; the next one waits ("Cancelled" runs are normal)
-  cancel-in-progress: false
+  group: housing-watcher       # one at a time; a new run replaces the old one ("Cancelled" is normal)
+  cancel-in-progress: true
 
 jobs:
   check:
