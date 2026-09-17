@@ -1,6 +1,6 @@
 # Runs the housing bot on GitHub's servers, for free.
-# Fast mode: every run keeps checking once a minute for about 9 minutes, and a
-# new run is started every 5 minutes, so there's (almost) always one running.
+# Always-on mode: each run keeps checking once a minute for up to 45 minutes, and
+# whenever the cron fires, that new run takes over from the old one (~40 s handover).
 # Secrets come from Settings -> Secrets and variables -> Actions, never from this file.
 
 name: Housing watcher
@@ -29,7 +29,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 50
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -56,7 +56,7 @@ jobs:
 
       - name: Check listings every minute (and apply)
         if: ${{ !inputs.mode || inputs.mode == 'normal' }}
-        run: python scraper.py --loop-minutes 9 --interval 60
+        run: python scraper.py --loop-minutes 45 --interval 60
 
       - name: Save seen listings
         if: ${{ always() && (!inputs.mode || inputs.mode == 'normal') }}
