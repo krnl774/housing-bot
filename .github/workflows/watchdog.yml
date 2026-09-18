@@ -1,0 +1,49 @@
+# Safety net for the Housing watcher.
+# A run that never gets a GitHub runner blocks every later run - that is what
+# silently killed the bot on 13 September 2026. This cancels such a run so the
+# schedule can carry on. It does nothing while the watcher is actually running.
+
+name: Watchdog
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write               # lets this job cancel a stuck Housing watcher run
+
+concurrency:
+  group: housing-watchdog      # its own group, so a stuck watcher can't block it
+  cancel-in-progress: true
+
+jobs:
+  unstick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel a watcher run that never got a runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          runs="repos/$GH_REPO/actions/workflows/housing-watcher.yml/runs?per_page=30"
+
+          # If a run is actually running, everything is fine - leave it alone.
+          busy=$(gh api "$runs" --jq '[.workflow_runs[] | select(.status == "in_progress")] | length')
+          if [ "$busy" -gt 0 ]; then
+            echo "The watcher is running. Nothing to do."
+            exit 0
+          fi
+
+          # Nothing running: anything still waiting after 12 minutes is stuck.
+          stuck=$(gh api "$runs" --jq '.workflow_runs[] | select(.status != "completed") | select(.created_at < (now - 720 | todate)) | .id')
+          if [ -z "$stuck" ]; then
+            echo "Nothing is stuck."
+            exit 0
+          fi
+          for id in $stuck; do
+            echo "Cancelling run $id - it never got a runner."
+            gh run cancel "$id" || true
+          done
