@@ -23,13 +23,13 @@ permissions:
   contents: write              # lets the job save which listings it has already seen
 
 concurrency:
-  group: housing-watcher       # one at a time; a new run replaces the old one ("Cancelled" is normal)
-  cancel-in-progress: true
+  group: housing-watcher       # one run at a time; the next one waits its turn
+  cancel-in-progress: false    # let a run finish and save before the next starts
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 30
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -56,7 +56,7 @@ jobs:
 
       - name: Check listings every minute (and apply)
         if: ${{ !inputs.mode || inputs.mode == 'normal' }}
-        run: python scraper.py --loop-minutes 45 --interval 60
+        run: python scraper.py --loop-minutes 25 --interval 60
 
       - name: Save seen listings
         if: ${{ always() && (!inputs.mode || inputs.mode == 'normal') }}
