@@ -125,6 +125,9 @@ SITES = [
         "site_url": "https://www.roomspot.nl",
         "details_path": "/en/housing-offer/to-rent/translate-to-engels-details/",
         # Notify only: Roomspot rooms are chosen by the housemates, not by speed.
+        "cities": ["Enschede", "Hengelo"],  # Roomspot only; Plaza uses CITIES
+        "only_independent": True,     # skip rooms in shared / group houses
+        "only_rent_allowance": True,  # skip anything marked "No rent benefit"
     },
 ]
 
@@ -277,6 +280,10 @@ def parse_zig365_item(item, site):
         "allocation": ALLOCATION_LABELS.get(model_code, model_code),
         "link": site["site_url"] + site["details_path"] + str(item.get("urlKey") or listing_id),
         "image": picture,
+        # "independent" = a place of your own, not a room in a shared house.
+        # "rent_allowance" is False only when the site says "No rent benefit".
+        "independent": item.get("isZelfstandig") in (1, "1", True),
+        "rent_allowance": item.get("huurtoeslagMogelijk") not in (0, "0"),
         # used for the Plaza preference match (never stored)
         "_match": {
             "regios": _id(item.get("regio")),
@@ -299,7 +306,13 @@ FETCHERS = {"zig365": fetch_zig365}
 # ------------------------------------------------------------------ filters --
 
 def in_my_cities(listing):
-    return not CITIES or listing["city"].strip().lower() in {c.strip().lower() for c in CITIES}
+    # A site can set its own "cities" list; otherwise CITIES above is used.
+    cities = CITIES
+    for s in SITES:
+        if s["key"] == listing["site"]:
+            cities = s.get("cities", CITIES)
+            break
+    return not cities or listing["city"].strip().lower() in {c.strip().lower() for c in cities}
 
 
 def passes_extra_filters(listing):
@@ -683,6 +696,11 @@ def check_site(site, dry_run=False):
     state["fail_streak"] = 0
 
     mine = [l for l in listings if in_my_cities(l)]
+    # Extra per-site filters (Roomspot: only your own place, allowance possible).
+    if site.get("only_independent"):
+        mine = [l for l in mine if l["independent"]]
+    if site.get("only_rent_allowance"):
+        mine = [l for l in mine if l["rent_allowance"]]
     new = [l for l in mine if l["id"] not in seen]
     report = {"dry_run": dry_run}
     statuses = {}
