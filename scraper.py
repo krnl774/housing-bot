@@ -1,13 +1,15 @@
 """
-Housing bot: Plaza + Roomspot -> Telegram, with Plaza auto-apply
-================================================================
+Housing bot: Plaza + Roomspot -> Telegram, with Roomspot auto-apply
+===================================================================
 
 What it does, every check:
   1. Reads the public listing pages of Plaza and Roomspot.
-  2. Sends every new listing (in your cities) to you on Telegram.
-  3. Plaza only, if your Plaza login is set: logs in, checks which new listings
-     match your Plaza preferences (the green house icon) and that Plaza lets you
+  2. Plaza (notify only): sends every new listing in your cities on Telegram.
+  3. Roomspot (auto-apply): logs in with your Roomspot account, checks which
+     listings in Enschede (incl. the UT campus) / Hengelo match your Roomspot
+     preferences (the green house with the heart) and that Roomspot lets you
      apply, then applies in your priority order and tells you on Telegram.
+     Roomspot listings that don't match your preferences are ignored.
 
 How to run it
 -------------
@@ -15,13 +17,13 @@ How to run it
     python scraper.py --loop-minutes 9       check every 60 s for 9 minutes (GitHub fast mode)
     python scraper.py                        check forever (own PC / server)
     python scraper.py --test                 send a Telegram test message
-    python scraper.py --check-login          log in to Plaza and report, without applying
+    python scraper.py --check-login          log in to Roomspot and report, without applying
 
 Secrets (NEVER put these in this file)
 --------------------------------------
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID     from @BotFather / getUpdates
-    PLAZA_USERNAME, PLAZA_PASSWORD           your Plaza login (optional: without
-                                             them the bot only notifies)
+    ROOMSPOT_USERNAME, ROOMSPOT_PASSWORD     your Roomspot login (needed to apply)
+    PLAZA_USERNAME, PLAZA_PASSWORD           no longer used (Plaza is notify-only)
 On GitHub these are repository Secrets. On your own computer: a .env file.
 """
 
@@ -57,12 +59,14 @@ except Exception:
 # Only listings in these cities are sent to you / applied for. [] = all cities.
 CITIES = ["Enschede"]
 
-# --- Plaza auto-apply -------------------------------------------------------
-# Needs PLAZA_USERNAME and PLAZA_PASSWORD secrets. Without them: notify only.
+# --- Auto-apply (Roomspot) --------------------------------------------------
+# Needs ROOMSPOT_USERNAME and ROOMSPOT_PASSWORD secrets. Without them: nothing
+# is applied. Which site applies is set per site below ("auto_apply").
 AUTO_APPLY = True
 
-# Only apply to listings that match your Plaza preferences (green house icon).
-# Change your preferences on the Plaza website; the bot follows them.
+# Only apply to listings that match your preferences on that site
+# (the green house with the heart). Change your preferences on the website;
+# the bot follows them.
 ONLY_PREFERENCE_MATCHES = True
 
 # Priority when several listings can be applied for at once:
@@ -74,7 +78,7 @@ BIG_FROM_M2 = 22           # "big" = at least this many m²
 # Safety limit: at most this many applications per check. None = no limit.
 MAX_APPLICATIONS_PER_CHECK = None
 
-# --- Extra filters (on top of your Plaza preferences) -----------------------
+# --- Extra filters (on top of your site preferences) ------------------------
 ONLY_TYPES = []            # e.g. ["Studio", "Apartment", "Room"]; [] = all
 MAX_RENT = None            # e.g. 900 (total rent per month); None = no limit
 
@@ -113,7 +117,7 @@ SITES = [
         "api_url": "https://mosaic-plaza-aanbodapi.zig365.nl/api/v1/actueel-aanbod",
         "site_url": "https://plaza.newnewnew.space",
         "details_path": "/en/availables-places/living-place/details/",
-        "auto_apply": True,       # uses PLAZA_USERNAME / PLAZA_PASSWORD
+        "auto_apply": False,      # notify only - the bot no longer applies on Plaza
     },
     {
         "key": "roomspot",
@@ -123,11 +127,15 @@ SITES = [
         "type": "zig365",
         "api_url": "https://studentenenschede-aanbodapi.zig365.nl/api/v1/actueel-aanbod",
         "site_url": "https://www.roomspot.nl",
+        "portal_url": "https://roomspot.nl",   # where the login lives (www redirects)
         "details_path": "/en/housing-offer/to-rent/translate-to-engels-details/",
-        # Notify only: Roomspot rooms are chosen by the housemates, not by speed.
+        # Enschede includes the University of Twente campus (a quarter of Enschede).
         "cities": ["Enschede", "Hengelo"],  # Roomspot only; Plaza uses CITIES
-        "only_independent": True,     # skip rooms in shared / group houses
-        "only_rent_allowance": True,  # skip anything marked "No rent benefit"
+        "auto_apply": True,           # uses ROOMSPOT_USERNAME / ROOMSPOT_PASSWORD
+        "login_env": ("ROOMSPOT_USERNAME", "ROOMSPOT_PASSWORD"),
+        # Only message you about listings that match your Roomspot preferences
+        # (applied / already applied / not allowed). Everything else is silent.
+        "notify_only_matches": True,
     },
 ]
 
@@ -146,8 +154,16 @@ def env(name):
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = env("TELEGRAM_CHAT_ID")
-PLAZA_USERNAME = env("PLAZA_USERNAME")
-PLAZA_PASSWORD = env("PLAZA_PASSWORD")
+
+
+def site_login(site):
+    """(username, password) for a site, from its own secrets."""
+    user_var, pass_var = site.get("login_env") or ("", "")
+    return env(user_var), env(pass_var)
+
+
+SECRETS = [TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID] + [
+    v for s in SITES for v in site_login(s)]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
@@ -172,7 +188,7 @@ def log(msg):
 
 def redact(text):
     text = str(text)
-    for secret in (TELEGRAM_BOT_TOKEN, PLAZA_PASSWORD, PLAZA_USERNAME, TELEGRAM_CHAT_ID):
+    for secret in SECRETS:
         if secret and len(secret) >= 4:
             text = text.replace(secret, "***")
     return text
@@ -324,7 +340,7 @@ def passes_extra_filters(listing):
 
 
 def matches_preferences(listing, profile):
-    """Same check as Plaza's green house icon, using your Plaza search profile."""
+    """Same check as the site's green house icon, using your search profile there."""
     if not profile:
         return False
     m = listing["_match"]
@@ -360,16 +376,18 @@ def priority(listing):
 PRIORITY_LABELS = {0: "big + high floor", 1: "high floor", 2: "other"}
 
 
-# -------------------------------------------------------------- plaza login --
+# ------------------------------------------------------------ site login --
+# Plaza and Roomspot share the same login / apply protocol (zig365).
 
 class PlazaError(Exception):
     pass
 
 
 class PlazaClient:
-    """Does what your browser does on plaza.newnewnew.space, with your own login."""
+    """Does what your browser does on a zig365 site (Roomspot, Plaza), with your own login."""
 
-    def __init__(self, portal_url, username, password):
+    def __init__(self, portal_url, username, password, name="Plaza"):
+        self.name = name
         self.portal = portal_url.rstrip("/")
         self.username, self.password = username, password
         self.s = requests.Session()
@@ -384,7 +402,7 @@ class PlazaClient:
         try:
             return r.json()
         except ValueError:
-            raise PlazaError(f"unexpected answer from Plaza (HTTP {r.status_code})")
+            raise PlazaError(f"unexpected answer from {self.name} (HTTP {r.status_code})")
 
     def login(self):
         r = self.s.post(self.portal + "/portal/proxy/frontend/api/v1/oauth/token",
@@ -394,9 +412,9 @@ class PlazaClient:
         body = self._json(r)
         err = body.get("error") if isinstance(body, dict) else None
         if err == "invalid_grant":
-            raise PlazaError("Plaza says the username or password is wrong")
+            raise PlazaError(f"{self.name} says the username or password is wrong")
         if err == "mfa_required":
-            raise PlazaError("your Plaza account uses two-step verification, "
+            raise PlazaError(f"your {self.name} account uses two-step verification, "
                              "which the bot can't do")
         if r.status_code >= 400 or err:
             raise PlazaError(f"login failed (HTTP {r.status_code}, {err or 'no details'})")
@@ -406,11 +424,11 @@ class PlazaClient:
         r = self.s.post(self.portal + "/portal/account/frontend/loginbyservice/format/json",
                         timeout=30)
         if r.status_code >= 400:
-            raise PlazaError(f"starting the Plaza session failed (HTTP {r.status_code})")
+            raise PlazaError(f"starting the {self.name} session failed (HTTP {r.status_code})")
         acc = self._json(self.s.get(self.portal + "/portal/account/frontend/getaccount/format/json",
                                     timeout=30))
         if not (isinstance(acc, dict) and acc.get("account")):
-            raise PlazaError("logged in, but Plaza doesn't show your account")
+            raise PlazaError(f"logged in, but {self.name} doesn't show your account")
         self.logged_in = True
         self.login_time = time.time()
         self.form = None
@@ -440,7 +458,7 @@ class PlazaClient:
             form = (body or {}).get("form") or {}
             h = ((form.get("elements") or {}).get("__hash__") or {}).get("initialData")
             if not h:
-                raise PlazaError("couldn't get Plaza's apply form")
+                raise PlazaError(f"couldn't get {self.name}'s apply form")
             self.form = {"__id__": form.get("id") or "Portal_Form_SubmitOnly", "__hash__": h}
         return dict(self.form)
 
@@ -465,18 +483,19 @@ class PlazaClient:
         return ok, "; ".join(messages)[:300], position
 
 
-_plaza_client = None
+_clients = {}
 
 
-def plaza_client(site):
-    global _plaza_client
-    if _plaza_client is None:
-        _plaza_client = PlazaClient(site["site_url"], PLAZA_USERNAME, PLAZA_PASSWORD)
-    return _plaza_client
+def site_client(site):
+    if site["key"] not in _clients:
+        user, password = site_login(site)
+        _clients[site["key"]] = PlazaClient(site.get("portal_url") or site["site_url"],
+                                            user, password, site["name"])
+    return _clients[site["key"]]
 
 
 def auto_apply_enabled(site):
-    return AUTO_APPLY and site.get("auto_apply") and PLAZA_USERNAME and PLAZA_PASSWORD
+    return bool(AUTO_APPLY and site.get("auto_apply") and all(site_login(site)))
 
 
 # ----------------------------------------------------------------- telegram --
@@ -575,7 +594,9 @@ def run_auto_apply(site, candidates, state, report):
     """Try to apply for candidates. Returns {listing_id: status line} for messages.
     Candidates that couldn't be evaluated (e.g. login problem) stay unevaluated."""
     statuses = {}
-    client = plaza_client(site)
+    client = site_client(site)
+    name = html.escape(site["name"])
+    user_var, pass_var = site.get("login_env") or ("", "")
     if time.time() < state.get("login_retry_after", 0):
         return statuses          # waiting after a failed login (protects your account)
     try:
@@ -586,43 +607,58 @@ def run_auto_apply(site, candidates, state, report):
             client.ensure_login()
             profile = client.preferences()
         if not profile:
-            raise PlazaError("couldn't read your Plaza preferences")
+            raise PlazaError(f"couldn't read your {site['name']} preferences")
     except (PlazaError, requests.RequestException) as e:
         client.logged_in = False
         streak = state["login_fail_streak"] = state.get("login_fail_streak", 0) + 1
         # wait longer after each failure (30 min, 60 min, ... max 6 h) so a wrong
-        # password never hammers Plaza and gets your account blocked
+        # password never hammers the site and gets your account blocked
         state["login_retry_after"] = time.time() + min(30 * 60 * streak, 6 * 3600)
-        log(f"  Plaza login problem ({streak} in a row), next try in {min(30 * streak, 360)} min")
+        log(f"  {site['name']} login problem ({streak} in a row), next try in {min(30 * streak, 360)} min")
         if streak in (1, 6):
-            send_text(f"⚠️ Couldn't log in to Plaza, so nothing was applied: "
-                      f"{html.escape(redact(e))}.\nYou still get new listings. "
-                      f"Check the PLAZA_USERNAME / PLAZA_PASSWORD secrets. "
+            send_text(f"⚠️ Couldn't log in to {name}, so nothing was applied: "
+                      f"{html.escape(redact(e))}.\n"
+                      f"Check the {user_var} / {pass_var} secrets. "
                       f"Next try in {min(30 * streak, 360)} minutes.")
         return statuses
     state.pop("login_retry_after", None)
     if state.get("login_fail_streak", 0) >= 1:
-        send_text("✅ Plaza login works again, auto-apply is back on.")
+        send_text(f"✅ {name} login works again, auto-apply is back on.")
     state["login_fail_streak"] = 0
 
     evaluated = state.setdefault("evaluated", [])
+    for l in candidates:
+        if not passes_extra_filters(l):
+            evaluated.append(l["id"])
+    candidates = [l for l in candidates if passes_extra_filters(l)]
+    if not candidates:
+        return statuses
+
+    # Ask the site, logged in, about each listing. Its answer includes
+    # "zoekprofielMatch" = the green house with the heart on the website.
+    try:
+        status = client.reaction_status([l["id"] for l in candidates])
+    except (PlazaError, requests.RequestException) as e:
+        client.logged_in = False
+        log(f"  couldn't read apply status: {type(e).__name__}")
+        return statuses
+    if not isinstance(status, dict):
+        status = {}
+
+    def is_match(l):
+        st = status.get(l["id"]) or {}
+        if "zoekprofielMatch" in st:
+            return bool(st["zoekprofielMatch"])
+        return matches_preferences(l, profile)   # fallback: same check, done here
+
     matching = []
     for l in candidates:
-        if ONLY_PREFERENCE_MATCHES and not matches_preferences(l, profile):
-            evaluated.append(l["id"])
-        elif not passes_extra_filters(l):
+        if ONLY_PREFERENCE_MATCHES and not is_match(l):
             evaluated.append(l["id"])
         else:
             matching.append(l)
     report["matching"] = len(matching)
     if not matching:
-        return statuses
-
-    try:
-        status = client.reaction_status([l["id"] for l in matching])
-    except (PlazaError, requests.RequestException) as e:
-        client.logged_in = False
-        log(f"  couldn't read apply status: {type(e).__name__}")
         return statuses
 
     to_apply = []
@@ -636,7 +672,7 @@ def run_auto_apply(site, candidates, state, report):
         elif action == "add" and st.get("kanReageren"):
             to_apply.append((l, st.get("url") or ""))
         elif st.get("kanReageren") is False and action not in (None, "login"):
-            reason = st.get("redenMagNietReagerenCode") or "Plaza doesn't allow it for your profile"
+            reason = st.get("redenMagNietReagerenCode") or f"{site['name']} doesn't allow it for your profile"
             statuses[l["id"]] = f"🏡 Matches your preferences, but you can't apply ({html.escape(str(reason))})."
             evaluated.append(l["id"])
         else:
@@ -666,7 +702,7 @@ def run_auto_apply(site, candidates, state, report):
             pos = f" Your place in line: <b>{html.escape(str(position))}</b>." if position else ""
             statuses[l["id"]] = f"✅ <b>Applied automatically</b> (priority: {label}).{pos}"
         else:
-            statuses[l["id"]] = (f"❌ Tried to apply but Plaza said no"
+            statuses[l["id"]] = (f"❌ Tried to apply but {name} said no"
                                  f"{': ' + html.escape(msg) if msg else ''}. Try it yourself via the link.")
         log(f"  apply attempt: {'ok' if ok else 'failed'}")
     return statuses
@@ -696,7 +732,7 @@ def check_site(site, dry_run=False):
     state["fail_streak"] = 0
 
     mine = [l for l in listings if in_my_cities(l)]
-    # Extra per-site filters (Roomspot: only your own place, allowance possible).
+    # Optional per-site filters: only your own place / rent allowance possible.
     if site.get("only_independent"):
         mine = [l for l in mine if l["independent"]]
     if site.get("only_rent_allowance"):
@@ -726,7 +762,12 @@ def check_site(site, dry_run=False):
         seen.update(l["id"] for l in mine)
 
     # Messages: every new listing, plus anything the bot just applied for.
-    to_message = {l["id"]: l for l in new} if not first_run else {}
+    # notify_only_matches sites: only listings that match your preferences.
+    if site.get("notify_only_matches"):
+        to_message = {lid: next(l for l in mine if l["id"] == lid) for lid in statuses}
+        seen.update(l["id"] for l in new if l["id"] not in to_message)
+    else:
+        to_message = {l["id"]: l for l in new} if not first_run else {}
     for lid in statuses:
         if statuses[lid].startswith(("✅", "❌", "🧪")) or lid in to_message:
             to_message[lid] = next(l for l in mine if l["id"] == lid)
@@ -756,9 +797,9 @@ def maybe_heartbeat(sites):
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR and bot.get("last_heartbeat") != today:
         names = ", ".join(s["name"] for s in sites)
-        apply_on = any(auto_apply_enabled(s) for s in sites)
+        applying = [s["name"] for s in sites if auto_apply_enabled(s)]
         if send_text(f"🟢 Still watching {html.escape(names)}. "
-                     f"Plaza auto-apply is {'ON' if apply_on else 'OFF'}."):
+                     f"Auto-apply: {html.escape(', '.join(applying)) if applying else 'OFF'}."):
             bot["last_heartbeat"] = today
             save_state("_bot", bot)
 
@@ -773,24 +814,31 @@ def run_once(dry_run=False):
 def check_login():
     """Log in and report on Telegram, without applying."""
     site = next(s for s in SITES if s.get("auto_apply"))
-    if not (PLAZA_USERNAME and PLAZA_PASSWORD):
-        send_text("⚠️ PLAZA_USERNAME / PLAZA_PASSWORD are not set, so auto-apply is off.")
+    name = html.escape(site["name"])
+    user_var, pass_var = site.get("login_env") or ("", "")
+    if not all(site_login(site)):
+        send_text(f"⚠️ {user_var} / {pass_var} are not set, so auto-apply is off.")
         return False
-    client = plaza_client(site)
+    client = site_client(site)
     try:
         client.login()
         profile = client.preferences()
         listings = [l for l in fetch_zig365(site) if in_my_cities(l)]
-        matching = [l for l in listings if matches_preferences(l, profile) and passes_extra_filters(l)]
-        status = client.reaction_status([l["id"] for l in matching]) if matching else {}
+        listings = [l for l in listings if passes_extra_filters(l)]
+        status = client.reaction_status([l["id"] for l in listings]) if listings else {}
+        status = status if isinstance(status, dict) else {}
+        matching = [l for l in listings
+                    if (status.get(l["id"]) or {}).get("zoekprofielMatch",
+                                                       matches_preferences(l, profile))]
     except (PlazaError, requests.RequestException) as e:
-        send_text(f"❌ Plaza login test failed: {html.escape(redact(e))}")
-        log("Plaza login test failed")
+        send_text(f"❌ {name} login test failed: {html.escape(redact(e))}")
+        log(f"{site['name']} login test failed")
         return False
     rent = f"€{profile.get('minimumRentalPrice') or 0:g}–{profile.get('maximumRentalPrice') or '∞'}"
-    lines = [f"✅ Logged in to Plaza. Auto-apply is {'ON' if AUTO_APPLY else 'OFF (AUTO_APPLY = False)'}.",
-             f"Your Plaza preferences: rent {rent}. Change them on the Plaza website.",
-             f"Cities the bot uses: {html.escape(', '.join(CITIES) or 'all')}.",
+    cities = site.get("cities", CITIES)
+    lines = [f"✅ Logged in to {name}. Auto-apply is {'ON' if AUTO_APPLY else 'OFF (AUTO_APPLY = False)'}.",
+             f"Your {name} preferences: rent {rent}. Change them on the {name} website.",
+             f"Cities the bot uses: {html.escape(', '.join(cities) or 'all')}.",
              f"Listings there matching your preferences right now: {len(matching)}"]
     for l in sorted(matching, key=priority):
         st = status.get(l["id"]) or {}
@@ -798,7 +846,7 @@ def check_login():
                 else "would apply" if st.get("kanReageren") else "not allowed to apply")
         lines.append(f'• <a href="{html.escape(l["link"])}">{html.escape(l["address"])}</a> – {what}')
     send_text("\n".join(lines))
-    log("Plaza login test OK")
+    log(f"{site['name']} login test OK")
     return True
 
 
@@ -808,7 +856,7 @@ def main():
     p.add_argument("--loop-minutes", type=float, default=0, help="keep checking for N minutes")
     p.add_argument("--interval", type=int, default=CHECK_INTERVAL, help="seconds between checks")
     p.add_argument("--test", action="store_true", help="send a Telegram test message")
-    p.add_argument("--check-login", action="store_true", help="test the Plaza login, no applying")
+    p.add_argument("--check-login", action="store_true", help="test the Roomspot login, no applying")
     p.add_argument("--dry-run", action="store_true", help="do everything except actually applying")
     args = p.parse_args()
 
