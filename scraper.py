@@ -131,7 +131,9 @@ SITES = [
         "type": "zig365",
         "api_url": "https://studentenenschede-aanbodapi.zig365.nl/api/v1/actueel-aanbod",
         "site_url": "https://www.roomspot.nl",
-        "portal_url": "https://roomspot.nl",   # where the login lives (www redirects)
+        # Login must go to www: roomspot.nl redirects there, and a redirect turns
+        # the login POST into a GET (HTTP 405).
+        "portal_url": "https://www.roomspot.nl",
         "details_path": "/en/housing-offer/to-rent/translate-to-engels-details/",
         # Enschede includes the University of Twente campus (a quarter of Enschede).
         "cities": ["Enschede", "Hengelo"],  # Roomspot only; Plaza uses CITIES
