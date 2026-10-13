@@ -8,8 +8,11 @@ What it does, every check:
   3. Roomspot (auto-apply): logs in with your Roomspot account, checks which
      listings in Enschede (incl. the UT campus) / Hengelo match your Roomspot
      preferences (the green house with the heart) and that Roomspot lets you
-     apply, then applies in your priority order and tells you on Telegram.
-     Roomspot listings that don't match your preferences are ignored.
+     apply, then applies in your priority order. No message per listing.
+  4. Roomspot: checks your account for offers (a room offered / assigned to
+     you) and sends you a Telegram message as soon as one appears or changes.
+  5. Daily "still running" message, with how many Roomspot applications were
+     sent since the previous one.
 
 How to run it
 -------------
@@ -85,6 +88,7 @@ MAX_RENT = None            # e.g. 900 (total rent per month); None = no limit
 # --- Messages ---------------------------------------------------------------
 DAILY_HEARTBEAT = True     # one "still running" message per day
 HEARTBEAT_HOUR = 9         # around this hour (Amsterdam time)
+OFFER_CHECK_MINUTES = 10   # how often to look for offers in your account
 WARN_AFTER_FAILURES = 12   # warn after this many failed checks in a row
 
 # Only used when running forever on your own PC / server.
@@ -133,9 +137,8 @@ SITES = [
         "cities": ["Enschede", "Hengelo"],  # Roomspot only; Plaza uses CITIES
         "auto_apply": True,           # uses ROOMSPOT_USERNAME / ROOMSPOT_PASSWORD
         "login_env": ("ROOMSPOT_USERNAME", "ROOMSPOT_PASSWORD"),
-        # Only message you about listings that match your Roomspot preferences
-        # (applied / already applied / not allowed). Everything else is silent.
-        "notify_only_matches": True,
+        "notify_listings": False,     # no message for new / applied listings
+        "watch_offers": True,         # message when Roomspot offers you something
     },
 ]
 
@@ -444,6 +447,19 @@ class PlazaClient:
             self.portal + "/portal/registration/frontend/getzoekprofielforapi/format/json", timeout=30))
         return (body or {}).get("result") or {}
 
+    def offers(self):
+        """Everything assigned / offered to you (the "offers" page on the site)."""
+        body = self._json(self.s.get(
+            self.portal + "/portal/registration/frontend/getassigneddwellings/format/json", timeout=30))
+        result = (body or {}).get("result") if isinstance(body, dict) else None
+        if result is None:
+            if isinstance(body, dict) and "result" in body:
+                return []
+            raise PlazaError(f"unexpected offers answer from {self.name}")
+        if isinstance(result, dict):   # some versions wrap the list
+            result = next((v for v in result.values() if isinstance(v, list)), [])
+        return result if isinstance(result, list) else []
+
     def reaction_status(self, ids):
         """Per listing: can you apply, and have you already applied?"""
         data = [("objectId[]", i) for i in ids]
@@ -590,15 +606,14 @@ def trim(ids, online, keep=800):
 
 # ------------------------------------------------------------- auto-apply --
 
-def run_auto_apply(site, candidates, state, report):
-    """Try to apply for candidates. Returns {listing_id: status line} for messages.
-    Candidates that couldn't be evaluated (e.g. login problem) stay unevaluated."""
-    statuses = {}
-    client = site_client(site)
+def login_or_backoff(site, client, state):
+    """Log in (if needed) and return your search profile, or None on failure.
+    After a failure, waits longer each time so a wrong password never gets
+    your account blocked."""
     name = html.escape(site["name"])
     user_var, pass_var = site.get("login_env") or ("", "")
     if time.time() < state.get("login_retry_after", 0):
-        return statuses          # waiting after a failed login (protects your account)
+        return None
     try:
         client.ensure_login()
         profile = client.preferences()
@@ -620,11 +635,24 @@ def run_auto_apply(site, candidates, state, report):
                       f"{html.escape(redact(e))}.\n"
                       f"Check the {user_var} / {pass_var} secrets. "
                       f"Next try in {min(30 * streak, 360)} minutes.")
-        return statuses
+        return None
     state.pop("login_retry_after", None)
     if state.get("login_fail_streak", 0) >= 1:
         send_text(f"✅ {name} login works again, auto-apply is back on.")
     state["login_fail_streak"] = 0
+
+    return profile
+
+
+def run_auto_apply(site, candidates, state, report):
+    """Try to apply for candidates. Returns {listing_id: status line} for messages.
+    Candidates that couldn't be evaluated (e.g. login problem) stay unevaluated."""
+    statuses = {}
+    client = site_client(site)
+    name = html.escape(site["name"])
+    profile = login_or_backoff(site, client, state)
+    if profile is None:
+        return statuses
 
     evaluated = state.setdefault("evaluated", [])
     for l in candidates:
@@ -708,6 +736,71 @@ def run_auto_apply(site, candidates, state, report):
     return statuses
 
 
+# ------------------------------------------------------------------- offers --
+
+OFFER_STATUS_LABELS = {
+    "aangeboden": "Offered to you 🎉",
+    "interesse": "You showed interest",
+    "geaccepteerd": "Accepted",
+    "toegewezen": "Assigned to you 🎉",
+    "geweigerd": "Declined",
+    "vervallen": "Expired",
+}
+
+
+def _offer_info(o, site):
+    """Pull the useful bits out of one offer, whatever shape it has."""
+    t = o.get("toewijzing") if isinstance(o.get("toewijzing"), dict) else {}
+    status = o.get("assignmentStatus") or ((t.get("status") or {}).get("code") if isinstance(t.get("status"), dict) else t.get("status")) or ""
+    obj = next((o[k] for k in ("object", "dwelling", "advertentie", "woning") if isinstance(o.get(k), dict)), o)
+    city = obj.get("city")
+    city = city.get("name") if isinstance(city, dict) else city
+    address = " ".join(str(p) for p in (obj.get("street"), obj.get("houseNumber"), obj.get("houseNumberAddition"))
+                       if p not in (None, "")).strip()
+    key = str(_first(o.get("id"), t.get("id"), obj.get("id"), json.dumps(o, sort_keys=True)[:200]))
+    deadline = _first(o.get("lastReactionDate"), o.get("uitersteReactiedatum"), t.get("uitersteReactiedatum"))
+    viewing = _first(o.get("bezichtigingsdatum"), o.get("bezichtiging"))
+    link = site["site_url"] + site["details_path"] + str(obj.get("urlKey") or obj.get("id") or "") if (obj.get("urlKey") or obj.get("id")) else site["site_url"]
+    return {"key": key, "status": str(status), "address": address or "(address not shown)",
+            "city": city or "", "deadline": deadline, "viewing": viewing, "link": link}
+
+
+def check_offers(site, state):
+    """Message you when something is offered to you, or its status changes."""
+    if time.time() < state.get("offers_next_check", 0):
+        return
+    state["offers_next_check"] = time.time() + OFFER_CHECK_MINUTES * 60
+    client = site_client(site)
+    if login_or_backoff(site, client, state) is None:
+        return
+    try:
+        offers = client.offers()
+    except (PlazaError, requests.RequestException) as e:
+        client.logged_in = False
+        log(f"  couldn't read {site['name']} offers: {type(e).__name__}")
+        return
+    known = state.setdefault("offers", {})
+    for o in offers:
+        if not isinstance(o, dict):
+            continue
+        info = _offer_info(o, site)
+        if known.get(info["key"]) == info["status"]:
+            continue
+        e = html.escape
+        label = OFFER_STATUS_LABELS.get(info["status"].lower(), info["status"] or "New")
+        lines = [f"🔔 <b>{e(site['name'])}: {e(label)}</b>",
+                 f"<b>{e(info['address'])}</b>" + (f", {e(info['city'])}" if info["city"] else "")]
+        if info["viewing"]:
+            lines.append(f"👀 Viewing: {e(str(info['viewing']))}")
+        if info["deadline"]:
+            lines.append(f"⏰ Respond before: {e(str(info['deadline']))}")
+        lines.append(f"\nLog in to {e(site['name'])} to respond. "
+                     f'<a href="{e(info["link"])}">Open listing →</a>')
+        if send_text("\n".join(lines)):
+            known[info["key"]] = info["status"]
+    log(f"{site['name']}: {len(offers)} offer(s) in your account")
+
+
 # --------------------------------------------------------------------- main --
 
 def check_site(site, dry_run=False):
@@ -749,7 +842,7 @@ def check_site(site, dry_run=False):
     log(f"{site['name']}: {len(listings)} online, {len(mine)} in your cities, {len(new)} new"
         + (f", {report.get('applied', 0)} applied" if auto_apply_enabled(site) else ""))
 
-    if first_run:
+    if first_run and site.get("notify_listings", True):
         lines = [f"👋 Now watching <b>{html.escape(site['name'])}</b>"
                  + (f" ({html.escape(', '.join(CITIES))})" if CITIES else "")
                  + f": {len(mine)} listing(s) online right now."]
@@ -762,13 +855,16 @@ def check_site(site, dry_run=False):
         seen.update(l["id"] for l in mine)
 
     # Messages: every new listing, plus anything the bot just applied for.
-    # notify_only_matches sites: only listings that match your preferences.
-    if site.get("notify_only_matches"):
-        to_message = {lid: next(l for l in mine if l["id"] == lid) for lid in statuses}
-        seen.update(l["id"] for l in new if l["id"] not in to_message)
+    if not site.get("notify_listings", True):
+        # Silent site: count what happened for the daily message, send nothing now.
+        daily = state.setdefault("daily", {"applied": 0, "failed": 0})
+        daily["applied"] += sum(1 for st in statuses.values() if st.startswith("✅"))
+        daily["failed"] += sum(1 for st in statuses.values() if st.startswith("❌"))
+        seen.update(l["id"] for l in mine)
+        to_message = {}
     else:
         to_message = {l["id"]: l for l in new} if not first_run else {}
-    for lid in statuses:
+    for lid in (statuses if site.get("notify_listings", True) else {}):
         if statuses[lid].startswith(("✅", "❌", "🧪")) or lid in to_message:
             to_message[lid] = next(l for l in mine if l["id"] == lid)
     for lid, l in sorted(to_message.items(), key=lambda kv: priority(kv[1])):
@@ -786,6 +882,8 @@ def check_site(site, dry_run=False):
     online = {l["id"] for l in listings}
     state["seen"] = trim([i for i in state.get("seen", []) if i in seen] + sorted(seen), online)
     state["evaluated"] = trim(state.get("evaluated", []), online)
+    if site.get("watch_offers") and auto_apply_enabled(site) and not dry_run:
+        check_offers(site, state)
     save_state(site["key"], state)
 
 
@@ -798,10 +896,20 @@ def maybe_heartbeat(sites):
     if now.hour >= HEARTBEAT_HOUR and bot.get("last_heartbeat") != today:
         names = ", ".join(s["name"] for s in sites)
         applying = [s["name"] for s in sites if auto_apply_enabled(s)]
-        if send_text(f"🟢 Still watching {html.escape(names)}. "
-                     f"Auto-apply: {html.escape(', '.join(applying)) if applying else 'OFF'}."):
+        text = (f"🟢 Still watching {html.escape(names)}. "
+                f"Auto-apply: {html.escape(', '.join(applying)) if applying else 'OFF'}.")
+        silent = [(s, load_state(s["key"], {})) for s in sites if not s.get("notify_listings", True)]
+        for s, st in silent:
+            d = st.get("daily") or {}
+            text += (f"\n{html.escape(s['name'])} since last message: {d.get('applied', 0)} applied"
+                     + (f", {d['failed']} failed (apply by hand?)" if d.get("failed") else "") + ".")
+        if send_text(text):
             bot["last_heartbeat"] = today
             save_state("_bot", bot)
+            for s, st in silent:
+                if st.get("daily"):
+                    st["daily"] = {"applied": 0, "failed": 0}
+                    save_state(s["key"], st)
 
 
 def run_once(dry_run=False):
@@ -827,6 +935,10 @@ def check_login():
         listings = [l for l in listings if passes_extra_filters(l)]
         status = client.reaction_status([l["id"] for l in listings]) if listings else {}
         status = status if isinstance(status, dict) else {}
+        try:
+            offers_line = f"Offers in your account right now: {len(client.offers())} (you get a message for each)."
+        except (PlazaError, requests.RequestException) as e:
+            offers_line = f"⚠️ Couldn't read your offers page: {html.escape(redact(e))}"
         matching = [l for l in listings
                     if (status.get(l["id"]) or {}).get("zoekprofielMatch",
                                                        matches_preferences(l, profile))]
@@ -839,6 +951,7 @@ def check_login():
     lines = [f"✅ Logged in to {name}. Auto-apply is {'ON' if AUTO_APPLY else 'OFF (AUTO_APPLY = False)'}.",
              f"Your {name} preferences: rent {rent}. Change them on the {name} website.",
              f"Cities the bot uses: {html.escape(', '.join(cities) or 'all')}.",
+             offers_line,
              f"Listings there matching your preferences right now: {len(matching)}"]
     for l in sorted(matching, key=priority):
         st = status.get(l["id"]) or {}
