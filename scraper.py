@@ -388,6 +388,11 @@ class PlazaError(Exception):
     pass
 
 
+class PlazaAuthError(PlazaError):
+    """The site rejected the login itself (wrong password, two-step verification).
+    Everything else (timeouts, server hiccups) is treated as temporary."""
+
+
 class PlazaClient:
     """Does what your browser does on a zig365 site (Roomspot, Plaza), with your own login."""
 
@@ -417,9 +422,9 @@ class PlazaClient:
         body = self._json(r)
         err = body.get("error") if isinstance(body, dict) else None
         if err == "invalid_grant":
-            raise PlazaError(f"{self.name} says the username or password is wrong")
+            raise PlazaAuthError(f"{self.name} says the username or password is wrong")
         if err == "mfa_required":
-            raise PlazaError(f"your {self.name} account uses two-step verification, "
+            raise PlazaAuthError(f"your {self.name} account uses two-step verification, "
                              "which the bot can't do")
         if r.status_code >= 400 or err:
             raise PlazaError(f"login failed (HTTP {r.status_code}, {err or 'no details'})")
@@ -608,42 +613,74 @@ def trim(ids, online, keep=800):
 
 # ------------------------------------------------------------- auto-apply --
 
+LOGIN_TRIES = 3              # quick retries before a login counts as failed
+WARN_AFTER_SLOW_LOGINS = 6   # temporary failures in a row before you get a message
+
+
 def login_or_backoff(site, client, state):
     """Log in (if needed) and return your search profile, or None on failure.
-    After a failure, waits longer each time so a wrong password never gets
-    your account blocked."""
+
+    The site is sometimes slow (a request times out now and then). Such hiccups
+    are retried a few times and stay silent; you only get a message when the
+    site really rejects your login, or when it keeps failing for about an hour.
+    A rejected password also makes the bot wait longer each time, so your
+    account never gets blocked."""
     name = html.escape(site["name"])
     user_var, pass_var = site.get("login_env") or ("", "")
     if time.time() < state.get("login_retry_after", 0):
         return None
-    try:
-        client.ensure_login()
-        profile = client.preferences()
-        if not profile:          # session silently expired? log in again once
-            client.logged_in = False
+    profile, error, rejected = None, None, False
+    for attempt in range(LOGIN_TRIES):
+        try:
             client.ensure_login()
             profile = client.preferences()
-        if not profile:
-            raise PlazaError(f"couldn't read your {site['name']} preferences")
-    except (PlazaError, requests.RequestException) as e:
-        client.logged_in = False
-        streak = state["login_fail_streak"] = state.get("login_fail_streak", 0) + 1
-        # wait longer after each failure (30 min, 60 min, ... max 6 h) so a wrong
-        # password never hammers the site and gets your account blocked
-        state["login_retry_after"] = time.time() + min(30 * 60 * streak, 6 * 3600)
-        log(f"  {site['name']} login problem ({streak} in a row), next try in {min(30 * streak, 360)} min")
-        if streak in (1, 6):
-            send_text(f"⚠️ Couldn't log in to {name}, so nothing was applied: "
-                      f"{html.escape(redact(e))}.\n"
-                      f"Check the {user_var} / {pass_var} secrets. "
-                      f"Next try in {min(30 * streak, 360)} minutes.")
-        return None
-    state.pop("login_retry_after", None)
-    if state.get("login_fail_streak", 0) >= 1:
-        send_text(f"✅ {name} login works again, auto-apply is back on.")
-    state["login_fail_streak"] = 0
+            if not profile:          # session silently expired? log in again once
+                client.logged_in = False
+                client.ensure_login()
+                profile = client.preferences()
+            if not profile:
+                raise PlazaError(f"couldn't read your {site['name']} preferences")
+            break
+        except PlazaAuthError as e:
+            client.logged_in = False
+            error, rejected, profile = e, True, None
+            break
+        except (PlazaError, requests.RequestException) as e:
+            client.logged_in = False
+            error, profile = e, None
+            if attempt < LOGIN_TRIES - 1:
+                time.sleep(5 * (attempt + 1))
 
-    return profile
+    if profile:
+        state.pop("login_retry_after", None)
+        if state.pop("login_warned", False):
+            send_text(f"✅ {name} login works again, auto-apply is back on.")
+        state["login_fail_streak"] = 0
+        state["login_slow_streak"] = 0
+        return profile
+
+    if rejected:
+        # wait longer after each rejection (30 min, 60 min, ... max 6 h)
+        streak = state["login_fail_streak"] = state.get("login_fail_streak", 0) + 1
+        wait = min(30 * streak, 360)
+        state["login_retry_after"] = time.time() + wait * 60
+        log(f"  {site['name']} rejected the login ({streak} in a row), next try in {wait} min")
+        if streak in (1, 6):
+            state["login_warned"] = True
+            send_text(f"⚠️ {name} rejected the login, so nothing is being applied: "
+                      f"{html.escape(redact(error))}.\n"
+                      f"Check the {user_var} / {pass_var} secrets. Next try in {wait} minutes.")
+        return None
+
+    slow = state["login_slow_streak"] = state.get("login_slow_streak", 0) + 1
+    log(f"  {site['name']} didn't answer properly ({type(error).__name__}, {slow} in a row); "
+        f"will try again next check")
+    if slow == WARN_AFTER_SLOW_LOGINS:
+        state["login_warned"] = True
+        send_text(f"⚠️ {name} has not been reachable for a while, so nothing is being applied: "
+                  f"{html.escape(redact(error))}.\nThe bot keeps trying; you'll get a message "
+                  f"when it works again.")
+    return None
 
 
 def run_auto_apply(site, candidates, state, report):
