@@ -50,9 +50,10 @@
   "20826"
  ],
  "fail_streak": 0,
- "login_fail_streak": 0,
+ "login_fail_streak": 1,
+ "login_retry_after": 1792337474.939222,
  "offers": {},
- "offers_next_check": 1792298361.2560477,
+ "offers_next_check": 1792336244.907948,
  "seen": [
   "20837",
   "20866",
