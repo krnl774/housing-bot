@@ -37,6 +37,8 @@ jobs:
       ROOMSPOT_PASSWORD: ${{ secrets.ROOMSPOT_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main              # latest saved state, not the (hours old) commit the run was queued on
 
       - uses: actions/setup-python@v6
         with:
@@ -69,5 +71,10 @@ jobs:
             exit 0
           fi
           git commit -m "Update seen listings"
-          git pull --rebase
-          git push
+          # If something else saved in the meantime, keep this run's state (it is newer).
+          for i in 1 2 3; do
+            git pull --rebase -X theirs && git push && exit 0
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
+          echo "::warning::Could not save the state this time; the next run will try again."
