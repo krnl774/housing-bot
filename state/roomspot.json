@@ -64,11 +64,11 @@
   "19962",
   "20826"
  ],
- "fail_streak": 48,
+ "fail_streak": 0,
  "login_fail_streak": 0,
- "login_slow_streak": 1,
+ "login_slow_streak": 0,
  "offers": {},
- "offers_next_check": 1792578702.4449134,
+ "offers_next_check": 1792602176.4260118,
  "seen": [
   "20837",
   "20866",
