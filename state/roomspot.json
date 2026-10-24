@@ -1,6 +1,6 @@
 {
  "daily": {
-  "applied": 1,
+  "applied": 0,
   "failed": 0
  },
  "evaluated": [
@@ -76,7 +76,7 @@
  "login_fail_streak": 0,
  "login_slow_streak": 0,
  "offers": {},
- "offers_next_check": 1792805832.3464744,
+ "offers_next_check": 1792826186.7876546,
  "seen": [
   "20837",
   "20866",
