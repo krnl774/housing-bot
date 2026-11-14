@@ -1,6 +1,6 @@
 {
  "daily": {
-  "applied": 1,
+  "applied": 0,
   "failed": 0
  },
  "evaluated": [
@@ -160,7 +160,7 @@
  "offers": {
   "21099": "Aangeboden"
  },
- "offers_next_check": 1794626707.0289829,
+ "offers_next_check": 1794647000.6841185,
  "seen": [
   "20767",
   "21033",
